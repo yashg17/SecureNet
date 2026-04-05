@@ -1,0 +1,59 @@
+gitignore# Secrets
+
+.env
+
+*.env
+
+!.env.example
+
+# Python
+
+__pycache__/
+
+*.pyc
+
+*.pyo
+
+venv/
+
+.venv/
+
+env/
+
+# Logs and reports
+
+logs/
+
+reports/
+
+*.log
+
+# Terraform state (contains secrets)
+
+terraform/.terraform/
+
+terraform/terraform.tfstate
+
+terraform/terraform.tfstate.backup
+
+terraform/.terraform.lock.hcl
+
+# SonarQube
+
+.scannerwork/
+
+.sonar/
+
+# IDE
+
+.idea/
+
+.vscode/
+
+*.swp
+
+.DS_Store
+
+# Docker
+
+.dockerignore
