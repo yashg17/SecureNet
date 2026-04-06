@@ -1,0 +1,20 @@
+groups:
+  - name: Securenet-Security-Alerts
+    rules:
+      - alert: BruteForceAttackDetected
+        expr: increase(brute_force_alerts_total[5m]) > 0
+        for: 0m
+        labels:
+          Severity: Critical
+        annotations:
+          summary: "Brute-force Attack Detected"
+          description: "A Brute-force Attack has been Detected. Check Discord for Claude triage."
+
+      - alert: HighFailedLoginRate
+        expr: rate(login_attempts_total{result="failed"}[5m]) * 60 > 10
+        for: 2m
+        labels:
+          Severity: Warning
+        annotations:
+          summary: "High Failed Login Rate"
+          description: "More than 10 failed logins per minute for 2 minutes."
