@@ -7,9 +7,9 @@ After=network-online.target
 User=alertmanager
 Group=alertmanager
 Type=simple
-ExecStart=/usr/local/bin/alertmanager \\
-    --config.file=/etc/alertmanager/alertmanager.yml \\
-    --storage.path=/var/lib/alertmanager/ \\
+ExecStart=/usr/local/bin/alertmanager \
+    --config.file=/etc/alertmanager/alertmanager.yml \
+    --storage.path=/var/lib/alertmanager/ \
     --web.listen-address=0.0.0.0:9093
 Restart=always
 
