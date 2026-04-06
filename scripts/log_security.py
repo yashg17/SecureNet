@@ -78,7 +78,7 @@ def process_line(line, now):
 
 def main():
     try:
-        start_http_server(METRICS_PORT)
+         start_http_server(METRICS_PORT, addr='0.0.0.0')
         print(f"[Online] Port {METRICS_PORT} | Log: {LOG_PATH}")
         for line in tail_file(LOG_PATH):
             process_line(line, time.time())
