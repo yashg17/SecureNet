@@ -1,0 +1,15 @@
+global:
+  resolve_timeout: 5m
+
+route:
+  group_by: ['alertname', 'Severity']
+  group_wait: 10s
+  group_interval: 2m
+  repeat_interval: 10m
+  receiver: 'discord-security'
+
+receivers:
+  - name: 'discord-security'
+    webhook_configs:
+      - url: 'https://discord.com/api/webhooks/1489752404311408801/D1Z1VOeuGrz-RKCnNhy1qy5lRKVg-biocsbB_iFeoD7WeofMXr6gMsbYjCj-gMqGgpSO'
+        send_resolve: true
