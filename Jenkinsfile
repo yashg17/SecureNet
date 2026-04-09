@@ -181,7 +181,7 @@ pipeline {
     post{
         always {
             echo "==> Cleaning Workspace and Docker Image..."
-            sh "docker rmi ${FULL_IMAGE} || true"
+            sh "sh "docker rmi ${env.FULL_IMAGE} || true"
             sh "docker logout || true"
             cleanWs()
             echo "==> Cleanup Complete."
