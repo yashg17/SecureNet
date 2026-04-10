@@ -6,7 +6,7 @@ pipeline {
         IMAGE_TAG = "${BUILD_NUMBER}"
         FULL_IMAGE = "${IMAGE_NAME}:${IMAGE_TAG}"
         AWS_REGION = "us-east-1"
-        // Ensure these credentials IDs exist in: Manage Jenkins -> Credentials
+        // Ensure these exist in Jenkins -> Manage Jenkins -> Credentials as Secret Text
         AWS_ACCOUNT_ID = credentials('AWS_ACCOUNT_ID') 
         ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         ECR_REPO = "securenet-parent-portal"
@@ -14,6 +14,7 @@ pipeline {
         SONAR_SCANNER_NAME = "Sonar Scanner"
         SONAR_PROJECT_KEY = "securenet-parent-portal"
         SONAR_TOKEN = credentials('SONAR_TOKEN')
+        QG_TIMEOUT_MINS = "5"
         CLAUDE_API_KEY = credentials('CLAUDE_API_KEY')
         DISCORD_WEBHOOK_URL = credentials('DISCORD_WEBHOOK_URL')
         CHECKOV_THRESHOLD = "HIGH"
@@ -26,22 +27,23 @@ pipeline {
                 echo "Build Number : ${env.BUILD_NUMBER}"
                 echo "Image : ${env.FULL_IMAGE}"
                 echo "========================="
-                // Using 'bat' if on Windows, 'sh' if on Linux. Based on your logs, you are on Windows.
-                sh "docker --version" 
-                sh "python --version"
+                bat "docker --version"
+                bat "python --version"
+                bat "git --version"
             }
         }
 
         stage('Checkov IaC Scan') {
             steps {
                 echo "==> Scanning Terraform code..."
-                sh "mkdir -p reports"
-                // Using 'true' to ensure the pipeline continues even if Checkov finds issues
-                sh """
-                    checkov -d terraform/ \
-                        --soft-fail \
-                        --output cli \
-                        --output-file-path reports/ || true
+                // Windows uses 'mkdir' without '-p'
+                bat "if not exist reports mkdir reports"
+                bat """
+                    checkov -d terraform/ ^
+                        --soft-fail-on LOW,MEDIUM ^
+                        --hard-fail-on ${CHECKOV_THRESHOLD} ^
+                        --output cli ^
+                        --output-file-path reports/ || exit 0
                 """
             }
             post {
@@ -54,7 +56,7 @@ pipeline {
         stage('Docker Build') {
             steps {
                 echo "==> Building Docker Image..."
-                sh "docker build -t ${FULL_IMAGE} ."
+                bat "docker build -t ${FULL_IMAGE} ."
             }
         }
 
@@ -63,11 +65,12 @@ pipeline {
                 withSonarQubeEnv("${SONAR_SERVER_NAME}") {
                     script {
                         def scannerHome = tool "${SONAR_SCANNER_NAME}"
-                        sh """
-                            ${scannerHome}/bin/sonar-scanner \
-                            -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
-                            -Dsonar.sources=. \
-                            -Dsonar.python.version=3.11 \
+                        // Use backslashes for Windows paths
+                        bat """
+                            "${scannerHome}\\bin\\sonar-scanner" ^
+                            -Dsonar.projectKey=${SONAR_PROJECT_KEY} ^
+                            -Dsonar.sources=app,scripts ^
+                            -Dsonar.python.version=3.11 ^
                             -Dsonar.token=${SONAR_TOKEN}
                         """
                     }
@@ -77,8 +80,7 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
-                // Shortened timeout to prevent hanging
-                timeout(time: 5, unit: 'MINUTES') {
+                timeout(time: Integer.parseInt(QG_TIMEOUT_MINS), unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
                 }
             }
@@ -86,20 +88,17 @@ pipeline {
 
         stage('Claude Security Summary') {
             steps {
-                sh "pip install anthropic python-dotenv --quiet"
+                bat "pip install anthropic python-dotenv --quiet"
                 script {
-                    // Running the triage script with the API Key passed via environment
-                    def result = sh(script: "python scripts/claude_triage_pipeline.py", returnStatus: true)
-                    if (result != 0) {
-                        echo "Claude AI flagged issues or script failed. Reviewing logs..."
-                    }
+                    def result = bat(script: "python scripts/claude_triage_pipeline.py", returnStatus: true)
+                    if (result == 1) error("Claude AI flagged CRITICAL issues")
                 }
             }
         }
 
         stage('Push to ECR') {
             steps {
-                sh """
+                bat """
                     aws ecr get-login-password --region ${AWS_REGION} | docker login --username AWS --password-stdin ${ECR_REGISTRY}
                     docker tag ${FULL_IMAGE} ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
                     docker push ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
@@ -110,31 +109,38 @@ pipeline {
         stage('Terraform Apply') {
             steps {
                 dir('terraform') {
-                    sh "terraform init"
-                    sh "terraform apply -auto-approve"
+                    bat "terraform init && terraform apply -auto-approve"
                 }
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                bat """
+                    aws eks update-kubeconfig --region ${AWS_REGION} --name Securenet-Cluster
+                    kubectl set image deployment/Securenet-App app=${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG} -n backend
+                """
             }
         }
     }
 
     post {
         always {
-            // FIX: We wrap the cleanup in a script block to ensure FilePath context
             script {
-                echo "==> Final Cleanup Tasks..."
-                try {
-                    sh "docker rmi ${FULL_IMAGE} || true"
-                    sh "docker logout ${ECR_REGISTRY} || true"
-                } catch (Exception e) {
-                    echo "Cleanup warning: ${e.message}"
+                // Check if workspace context exists before running cleanup commands
+                if (getContext(hudson.FilePath)) {
+                    echo "==> Cleaning Workspace..."
+                    bat "docker rmi ${FULL_IMAGE} || exit 0"
+                    bat "docker logout || exit 0"
+                    cleanWs()
                 }
             }
         }
         success {
-            echo "==> SUCCESS: Build ${env.BUILD_NUMBER} deployed."
+            echo "==> Build ${env.BUILD_NUMBER} Deployed Successfully."
         }
         failure {
-            echo "==> FAILURE: Build ${env.BUILD_NUMBER} failed. Check Discord for logs."
+            echo "==> Build ${env.BUILD_NUMBER} Failed."
         }
     }
 }
