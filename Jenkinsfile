@@ -2,13 +2,18 @@ pipeline {
     agent any
     
     environment {
+        // Basic Image Config
         IMAGE_NAME = "securenet-parent-portal"
         IMAGE_TAG = "${BUILD_NUMBER}"
         FULL_IMAGE = "${IMAGE_NAME}:${IMAGE_TAG}"
+        
+        // AWS Config - Ensure 'AWS_ACCOUNT_ID' exists in Jenkins Credentials
         AWS_REGION = "us-east-1"
         AWS_ACCOUNT_ID = credentials('AWS_ACCOUNT_ID')
         ECR_REGISTRY = "${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
         ECR_REPO = "securenet-parent-portal"
+        
+        // Tools & Security
         SONAR_SERVER_NAME = "SonarQube"
         SONAR_SCANNER_NAME = "Sonar Scanner"
         SONAR_PROJECT_KEY = "securenet-parent-portal"
@@ -23,9 +28,9 @@ pipeline {
         stage('Environment Info') {
             steps {
                 echo "========================="
-                echo "Build Number : ${BUILD_NUMBER}"
-                echo "Image : ${FULL_IMAGE}"
-                echo "ECR Registry : ${ECR_REGISTRY}"
+                echo "Build Number : ${env.BUILD_NUMBER}"
+                echo "Image        : ${env.FULL_IMAGE}"
+                echo "ECR Registry : ${env.ECR_REGISTRY}"
                 echo "========================="
                 sh "docker --version"
                 sh "python3 --version"
@@ -35,34 +40,41 @@ pipeline {
 
         stage('Checkov IaC Scan') {
             steps {
-                echo "==> Scanning Terraform code..."
+                echo "==> Scanning Terraform code with Checkov..."
                 sh """
+                    mkdir -p reports
                     checkov -d terraform/ \
                         --soft-fail-on LOW,MEDIUM \
-                        --hard-fail-on ${CHECKOV_THRESHOLD} \
+                        --hard-fail-on ${env.CHECKOV_THRESHOLD} \
                         --output cli \
-                        || true
+                        --output-file-path reports/ || true
                 """
+            }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/*.txt', allowEmptyArchive: true
+                }
             }
         }
 
         stage('Docker Build') {
             steps {
-                echo "==> Building Docker Image..."
-                sh "docker build -t ${FULL_IMAGE} ."
+                echo "==> Building Docker Image: ${env.FULL_IMAGE}..."
+                sh "docker build -t ${env.FULL_IMAGE} ."
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                withSonarQubeEnv("${SONAR_SERVER_NAME}") {
+                withSonarQubeEnv("${env.SONAR_SERVER_NAME}") {
                     script {
-                        def scannerHome = tool "${SONAR_SCANNER_NAME}"
+                        def scannerHome = tool "${env.SONAR_SCANNER_NAME}"
                         sh """
                             ${scannerHome}/bin/sonar-scanner \
-                            -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
+                            -Dsonar.projectKey=${env.SONAR_PROJECT_KEY} \
                             -Dsonar.sources=app,scripts \
-                            -Dsonar.python.version=3.11
+                            -Dsonar.python.version=3.11 \
+                            -Dsonar.exclusions=**/__pycache__/**,**/*.pyc
                         """
                     }
                 }
@@ -71,7 +83,7 @@ pipeline {
 
         stage('Quality Gate') {
             steps {
-                timeout(time: Integer.parseInt(QG_TIMEOUT_MINS), unit: 'MINUTES') {
+                timeout(time: Integer.parseInt(env.QG_TIMEOUT_MINS), unit: 'MINUTES') {
                     waitForQualityGate abortPipeline: true
                 }
             }
@@ -80,6 +92,7 @@ pipeline {
         stage('Claude Security Summary') {
             steps {
                 sh "pip3 install anthropic python-dotenv --quiet"
+                sh "mkdir -p reports"
                 script {
                     def result = sh(script: "python3 scripts/claude_triage_pipeline.py", returnStatus: true)
                     if (result == 1) {
@@ -87,15 +100,20 @@ pipeline {
                     }
                 }
             }
+            post {
+                always {
+                    archiveArtifacts artifacts: 'reports/claude_pipeline_*.json', allowEmptyArchive: true
+                }
+            }
         }
 
         stage('Push to ECR') {
             steps {
                 sh """
-                    aws ecr get-login-password --region ${AWS_REGION} | \
-                        docker login --username AWS --password-stdin ${ECR_REGISTRY}
-                    docker tag ${FULL_IMAGE} ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
-                    docker push ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+                    aws ecr get-login-password --region ${env.AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${env.ECR_REGISTRY}
+                    docker tag ${env.FULL_IMAGE} ${env.ECR_REGISTRY}/${env.ECR_REPO}:${env.IMAGE_TAG}
+                    docker push ${env.ECR_REGISTRY}/${env.ECR_REPO}:${env.IMAGE_TAG}
                 """
             }
         }
@@ -112,28 +130,19 @@ pipeline {
         stage('Deploy to EKS') {
             steps {
                 sh """
-                    aws eks update-kubeconfig --region ${AWS_REGION} --name Securenet-Cluster
+                    aws eks update-kubeconfig --region ${env.AWS_REGION} --name Securenet-Cluster
+                    kubectl apply -f k8s/namespace.yml
+                    kubectl apply -f k8s/network-policy.yml
                     kubectl set image deployment/Securenet-App \
-                        app=${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG} \
+                        app=${env.ECR_REGISTRY}/${env.ECR_REPO}:${env.IMAGE_TAG} \
                         -n backend
-                """   
+                """
             }
         }
-    } // End of Stages
+    }
 
     post {
         always {
-            echo "==> Cleaning Workspace..."
-            // FIXED: Removed the extra "sh" and fixed quotes
-            sh "docker rmi ${FULL_IMAGE} || true"
-            sh "docker logout || true"
-            cleanWs()
-        }
-        success {
-            echo "==> Build ${BUILD_NUMBER} Deployed Successfully."
-        }
-        failure {
-            echo "==> Build ${BUILD_NUMBER} Failed."
-        }
-    }
-}
+            echo "==> Cleaning Workspace and Local Docker Image..."
+            // Using env. prefix ensures the variables are found in the post-block scope
+            sh "docker rmi
