@@ -2,7 +2,6 @@ pipeline {
     agent any
     
     environment {
-        
         IMAGE_NAME = "securenet-parent-portal"
         IMAGE_TAG = "${BUILD_NUMBER}"
         FULL_IMAGE = "${IMAGE_NAME}:${IMAGE_TAG}"
@@ -20,12 +19,9 @@ pipeline {
         CHECKOV_THRESHOLD = "HIGH"
     }
 
-    stages{
-
-        // STAGE 1
-
+    stages {
         stage('Environment Info') {
-            steps{
+            steps {
                 echo "========================="
                 echo "Build Number : ${BUILD_NUMBER}"
                 echo "Image : ${FULL_IMAGE}"
@@ -39,10 +35,8 @@ pipeline {
             }
         }
 
-        // STAGE 2
-
         stage('Checkov IaC Scan') {
-            steps{
+            steps {
                 echo "==> Scanning Terraform code with Checkov..."
                 sh """
                     checkov -d terraform/ \
@@ -54,144 +48,29 @@ pipeline {
                 """
                 echo "==> Checkov Scan Complete."   
             }
-            post{
+            post {
                 always {
-                    archiveArtifacts artifacts: 'reqports/*.txt', allowEmptyArchive: true
+                    archiveArtifacts artifacts: 'reports/*.txt', allowEmptyArchive: true
                 }
             }
         }
 
-        // STAGE 3
-
         stage('Docker Build') {
-            steps{
+            steps {
                 echo "==> Building Docker Image: ${FULL_IMAGE}..."
-                sh "docker build -t ${FULL_IMAGE}."
+                sh "docker build -t ${FULL_IMAGE} ."
                 echo "==> Docker Build Complete."
             }
         }
 
-        // STAGE 4
-
         stage('SonarQube Analysis') {
-            steps{
+            steps {
                 echo "==> Starting SonarQube SAST Scan..."
                 withSonarQubeEnv("${SONAR_SERVER_NAME}") {
                     script {
                         def scannerHome = tool "${SONAR_SCANNER_NAME}"
                         sh """
                             ${scannerHome}/bin/sonar-scanner \
-                            -Dsonar.projectkey=${SONAR_PROJECT_KEY} \
+                            -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                             -Dsonar.sources=app,scripts \
-                            -Dsonar.python.version=3.11 \
-                            -Dsonar.exclusions=**/__pycache__/**,**/*.pyc
-                        """
-                    }
-                }
-                echo "==> SonarQube Analysis Submitted." 
-            }
-        }
-
-        // STAGE 5
-
-        stage('Quality Gate') {
-            steps{
-                echo "==> Waiting for SonarQube Quality Gate..."
-                timeout(time: Integer.parseInt(QG_TIMEOUT_MINS), unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
-                }
-                echo "==> Quality Gate PASSED."
-            }
-        }
-
-        // STAGE 6
-
-        stage('Claude Security Summary') {
-            steps{
-                echo "==> Generating Calude AI Security Summary..."
-                sh "pip3 install anthropic python-dotenv --quiet"
-                sh "mkdir -p reports"
-                script {
-                    def result = sh(
-                        script: "python3 scripts/claude_triage_pipeline.py",
-                        returnStatus: true
-                    )
-                    if (result == 1) {
-                        error("Claude AI flagged CRITICAL issues - Blocking Deployment")
-                    }
-                }
-                echo "==> Claude Summary Complete."
-            }
-            post{
-                always {
-                    archiveArtifacts artifacts: 'reports/claude_pipeline_*.json', allowEmptyArchive: true
-                }
-            }
-        }
-
-        // STAGE 7
-
-        stage('Push to ECR') {
-            steps{
-                echo "==> Pushing Image to ECR..."
-                sh """
-                    aws ecr get-login-password --region ${AWS_REGION} | \
-                        docker login --username AWS --password-stdin ${ECR_REGISTRY}
-                    docker tag ${FULL_IMAGE} ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
-                """
-                echo "==> Pushed to: ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"        
-            }
-        }
-
-        // STAGE 8
-
-        stage('Terraform Apply') {
-            steps{
-                echo "==> Applying Terraform Infrastructure..."
-                dir('terraform') {
-                    sh "terraform init"
-                    sh "terraform validate"
-                    sh "terraform plan -out=tfplan"
-                    sh "terraform apply -aut-approve tfplan"
-                }
-                echo "==> Terraform Apply Complete."
-            }
-        }
-
-        // STAGE 9
-
-        stage('Deploy to EKS') {
-            steps{
-                echo "==> Deploying to EKS..."
-                sh """
-                    aws eks update-kubeconfig --region ${AWS_REGION} --name Securenet-Cluster
-                    kubectl apply -f k8s/namespace.yml
-                    kubectl apply -f k8s/network-policy.yml
-                    kubectl set image deployment/Securenet-App \
-                        app=${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG} \
-                        -n backend
-                """   
-                echo "==> EKS Deployment Complete."        
-            }
-        }
-    }
-
-    // POST CLEANING
-
-    post{
-        always {
-            echo "==> Cleaning Workspace and Docker Image..."
-            sh "sh "docker rmi ${env.FULL_IMAGE} || true"
-            sh "docker logout || true"
-            cleanWs()
-            echo "==> Cleanup Complete."
-        }
-        success {
-            echo "==> PIPELINE PASSED - Build ${BUILD_NUMBER} deployed to EKS."
-        }
-        failure {
-            echo "==> PIPELINE FAILED - Build ${BUILD_NUMBER} unsuccessful"
-            echo "==> Check: SonarQube Dashboard, Checkov Report, Claude Summary, ECR"
-        }
-    }
-}
+                            -Dsonar.python.version=3
