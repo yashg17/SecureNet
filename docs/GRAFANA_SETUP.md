@@ -3,7 +3,7 @@
 ## Data source
 Grafana → Configuration → Data sources → Add → Prometheus
 - Name: Prometheus
-- URL: http://44.220.244.141:9090
+- URL: http://34.239.176.44:9090
 - Save and test — should show "Data source is working"
 
 ## Dashboard
