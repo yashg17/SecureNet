@@ -31,6 +31,10 @@ pipeline {
                 // Added 'py' as a fallback for Windows
                 bat "python --version || py --version" 
                 bat "git --version"
+                bat """
+                    "C:\\Python311\\python.exe" --version
+                    "C:\\Python311\\Scripts\\pip.exe" --version
+                """
             }
         }
 
