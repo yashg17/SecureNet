@@ -26,8 +26,6 @@ pipeline {
                 echo "Build Number : ${BUILD_NUMBER}"
                 echo "Image : ${FULL_IMAGE}"
                 echo "ECR Registry : ${ECR_REGISTRY}"
-                echo "SonarQube : ${SONAR_SERVER_NAME}"
-                echo "Scanner : ${SONAR_SCANNER_NAME}"
                 echo "========================="
                 sh "docker --version"
                 sh "python3 --version"
@@ -37,35 +35,26 @@ pipeline {
 
         stage('Checkov IaC Scan') {
             steps {
-                echo "==> Scanning Terraform code with Checkov..."
+                echo "==> Scanning Terraform code..."
                 sh """
                     checkov -d terraform/ \
                         --soft-fail-on LOW,MEDIUM \
                         --hard-fail-on ${CHECKOV_THRESHOLD} \
                         --output cli \
-                        --output-file-path reports/ \
                         || true
                 """
-                echo "==> Checkov Scan Complete."   
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'reports/*.txt', allowEmptyArchive: true
-                }
             }
         }
 
         stage('Docker Build') {
             steps {
-                echo "==> Building Docker Image: ${FULL_IMAGE}..."
+                echo "==> Building Docker Image..."
                 sh "docker build -t ${FULL_IMAGE} ."
-                echo "==> Docker Build Complete."
             }
         }
 
         stage('SonarQube Analysis') {
             steps {
-                echo "==> Starting SonarQube SAST Scan..."
                 withSonarQubeEnv("${SONAR_SERVER_NAME}") {
                     script {
                         def scannerHome = tool "${SONAR_SCANNER_NAME}"
@@ -73,4 +62,78 @@ pipeline {
                             ${scannerHome}/bin/sonar-scanner \
                             -Dsonar.projectKey=${SONAR_PROJECT_KEY} \
                             -Dsonar.sources=app,scripts \
-                            -Dsonar.python.version=3
+                            -Dsonar.python.version=3.11
+                        """
+                    }
+                }
+            }
+        }
+
+        stage('Quality Gate') {
+            steps {
+                timeout(time: Integer.parseInt(QG_TIMEOUT_MINS), unit: 'MINUTES') {
+                    waitForQualityGate abortPipeline: true
+                }
+            }
+        }
+
+        stage('Claude Security Summary') {
+            steps {
+                sh "pip3 install anthropic python-dotenv --quiet"
+                script {
+                    def result = sh(script: "python3 scripts/claude_triage_pipeline.py", returnStatus: true)
+                    if (result == 1) {
+                        error("Claude AI flagged CRITICAL issues - Blocking Deployment")
+                    }
+                }
+            }
+        }
+
+        stage('Push to ECR') {
+            steps {
+                sh """
+                    aws ecr get-login-password --region ${AWS_REGION} | \
+                        docker login --username AWS --password-stdin ${ECR_REGISTRY}
+                    docker tag ${FULL_IMAGE} ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+                    docker push ${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG}
+                """
+            }
+        }
+
+        stage('Terraform Apply') {
+            steps {
+                dir('terraform') {
+                    sh "terraform init"
+                    sh "terraform apply -auto-approve"
+                }
+            }
+        }
+
+        stage('Deploy to EKS') {
+            steps {
+                sh """
+                    aws eks update-kubeconfig --region ${AWS_REGION} --name Securenet-Cluster
+                    kubectl set image deployment/Securenet-App \
+                        app=${ECR_REGISTRY}/${ECR_REPO}:${IMAGE_TAG} \
+                        -n backend
+                """   
+            }
+        }
+    } // End of Stages
+
+    post {
+        always {
+            echo "==> Cleaning Workspace..."
+            // FIXED: Removed the extra "sh" and fixed quotes
+            sh "docker rmi ${FULL_IMAGE} || true"
+            sh "docker logout || true"
+            cleanWs()
+        }
+        success {
+            echo "==> Build ${BUILD_NUMBER} Deployed Successfully."
+        }
+        failure {
+            echo "==> Build ${BUILD_NUMBER} Failed."
+        }
+    }
+}
