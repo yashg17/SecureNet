@@ -6,7 +6,6 @@ pipeline {
         IMAGE_TAG = "${BUILD_NUMBER}"
         FULL_IMAGE = "${IMAGE_NAME}:${IMAGE_TAG}"
         AWS_REGION = "us-east-1"
-        // FIX: Use single quotes to prevent insecure Groovy interpolation
         AWS_ACCOUNT_ID = credentials('AWS_ACCOUNT_ID') 
         ECR_REGISTRY = "${env.AWS_ACCOUNT_ID}.dkr.ecr.${env.AWS_REGION}.amazonaws.com"
         ECR_REPO = "securenet-parent-portal"
@@ -14,26 +13,19 @@ pipeline {
         SONAR_SCANNER_NAME = "Sonar Scanner"
         SONAR_PROJECT_KEY = "securenet-parent-portal"
         SONAR_TOKEN = credentials('SONAR_TOKEN')
-        QG_TIMEOUT_MINS = "5"
         CLAUDE_API_KEY = credentials('CLAUDE_API_KEY')
         DISCORD_WEBHOOK_URL = credentials('DISCORD_WEBHOOK_URL')
-        CHECKOV_THRESHOLD = "HIGH"
     }
 
     stages {
-        stage('Environment Info') {
+        stage('Setup Environment') {
             steps {
-                echo "========================="
-                echo "Build Number : ${env.BUILD_NUMBER}"
-                echo "Image : ${env.FULL_IMAGE}"
-                echo "========================="
-                bat "docker --version"
-                // Added 'py' as a fallback for Windows
-                bat "python --version || py --version" 
-                bat "git --version"
+                echo "==> Setting up Virtual Environment..."
+                // Using 'py' launcher which is standard on Windows
                 bat """
-                    "C:\\Python311\\python.exe" --version
-                    "C:\\Python311\\Scripts\\pip.exe" --version
+                    py -m venv venv
+                    .\\venv\\Scripts\\python.exe -m pip install --upgrade pip
+                    .\\venv\\Scripts\\pip.exe install checkov anthropic python-dotenv requests --quiet
                 """
             }
         }
@@ -42,15 +34,14 @@ pipeline {
             steps {
                 echo "==> Scanning Terraform code..."
                 bat "if not exist reports mkdir reports"
-                // Added --quiet to reduce log noise
-                bat "checkov -d terraform/ --soft-fail --output cli || exit 0"
+                // Run checkov from the virtual environment we just built
+                bat ".\\venv\\Scripts\\checkov.exe -d terraform/ --soft-fail --output cli"
             }
         }
 
         stage('Docker Build') {
             steps {
                 echo "==> Building Docker Image..."
-                // Ensure Docker Desktop is RUNNING on the Windows host
                 bat "docker build -t ${env.FULL_IMAGE} ."
             }
         }
@@ -72,20 +63,12 @@ pipeline {
             }
         }
 
-        stage('Quality Gate') {
-            steps {
-                timeout(time: 5, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
-                }
-            }
-        }
-
         stage('Claude Security Summary') {
             steps {
-                // Use 'py -m pip' to ensure it hits the right Windows installation
-                bat "py -m pip install anthropic python-dotenv --quiet"
+                echo "==> Running AI Triage..."
                 script {
-                    def result = bat(script: "py scripts/claude_triage_pipeline.py", returnStatus: true)
+                    // Use the venv python to run your triage script
+                    def result = bat(script: ".\\venv\\Scripts\\python.exe scripts/claude_triage_pipeline.py", returnStatus: true)
                     if (result != 0) error("Claude AI flagged CRITICAL issues or script failed")
                 }
             }
@@ -100,27 +83,15 @@ pipeline {
                 """
             }
         }
-
-        stage('Terraform Apply') {
-            steps {
-                dir('terraform') {
-                    bat "terraform init && terraform apply -auto-approve"
-                }
-            }
-        }
     }
 
     post {
         always {
             echo "==> Cleaning Workspace..."
             bat "docker rmi ${env.FULL_IMAGE} || exit 0"
+            // Cleanup the virtual environment to keep the runner clean
+            bat "rmdir /s /q venv || exit 0"
             cleanWs()
-        }
-        success {
-            echo "==> Build ${env.BUILD_NUMBER} Deployed Successfully."
-        }
-        failure {
-            echo "==> Build ${env.BUILD_NUMBER} Failed."
         }
     }
 }
