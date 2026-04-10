@@ -18,9 +18,15 @@ pipeline {
     }
 
     stages {
-        stage('Setup Environment') {
+        stage('Environment Info') {
             steps {
                 echo "==> Setting up Virtual Environment..."
+                echo "==> Verifying Path Integrations..."
+                bat """
+                    python --version
+                    pip --version
+                    checkov --version
+                """
                 // Using 'py' launcher which is standard on Windows
                 bat """
                     py -m venv venv
